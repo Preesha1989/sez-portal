@@ -1,66 +1,52 @@
-// src/services/assignmentService.js
-// Round-robin auto-assignment across active SEZ members.
-// Picks the member with the lowest current queue_count.
+const pool = require('../models/db');
 
-const db = require('../models/db');
-
-/**
- * Returns the sez_member id to assign a new request to.
- * Strategy: pick the active member with the lowest queue_count.
- * Ties broken by member creation order (oldest member first).
- */
-function autoAssign() {
-  const member = db.prepare(`
-    SELECT m.id
-    FROM sez_members m
+async function autoAssign() {
+  const res = await pool.query(`
+    SELECT m.id FROM sez_members m
     JOIN users u ON u.id = m.user_id
     WHERE m.is_active = 1 AND u.is_active = 1
     ORDER BY m.queue_count ASC, m.created_at ASC
     LIMIT 1
-  `).get();
-
-  return member ? member.id : null;
+  `);
+  return res.rows[0]?.id || null;
 }
 
-/**
- * Increment queue_count for a member (called when a request is assigned).
- */
-function incrementCount(memberId) {
-  db.prepare(`UPDATE sez_members SET queue_count = queue_count + 1 WHERE id = ?`).run(memberId);
+async function incrementCount(memberId) {
+  await pool.query(
+    `UPDATE sez_members SET queue_count = queue_count + 1 WHERE id = $1`,
+    [memberId]
+  );
 }
 
-/**
- * Decrement queue_count for a member (called when closed/rejected or reassigned away).
- */
-function decrementCount(memberId) {
-  db.prepare(`
-    UPDATE sez_members
-    SET queue_count = MAX(0, queue_count - 1)
-    WHERE id = ?
-  `).run(memberId);
+async function decrementCount(memberId) {
+  await pool.query(
+    `UPDATE sez_members SET queue_count = GREATEST(0, queue_count - 1) WHERE id = $1`,
+    [memberId]
+  );
 }
 
-/**
- * Reassign a request from one member to another.
- * Updates queue counts and the request row atomically.
- */
-function reassign(requestId, newMemberId) {
-  const txn = db.transaction(() => {
-    const req = db.prepare(`SELECT assigned_to FROM requests WHERE id = ?`).get(requestId);
-    if (!req) throw new Error('Request not found');
-
-    if (req.assigned_to && req.assigned_to !== newMemberId) {
-      decrementCount(req.assigned_to);
+async function reassign(requestId, newMemberId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const req = await client.query(`SELECT assigned_to FROM requests WHERE id = $1`, [requestId]);
+    if (!req.rows[0]) throw new Error('Request not found');
+    const oldMember = req.rows[0].assigned_to;
+    if (oldMember && oldMember !== newMemberId) {
+      await client.query(`UPDATE sez_members SET queue_count = GREATEST(0, queue_count - 1) WHERE id = $1`, [oldMember]);
     }
-    if (!req.assigned_to || req.assigned_to !== newMemberId) {
-      incrementCount(newMemberId);
+    if (!oldMember || oldMember !== newMemberId) {
+      await client.query(`UPDATE sez_members SET queue_count = queue_count + 1 WHERE id = $1`, [newMemberId]);
     }
-
-    db.prepare(`
-      UPDATE requests SET assigned_to = ?, updated_at = ? WHERE id = ?
-    `).run(newMemberId, new Date().toISOString(), requestId);
-  });
-  txn();
+    await client.query(`UPDATE requests SET assigned_to = $1, updated_at = $2 WHERE id = $3`,
+      [newMemberId, new Date().toISOString(), requestId]);
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 module.exports = { autoAssign, incrementCount, decrementCount, reassign };

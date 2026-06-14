@@ -1,38 +1,49 @@
-// src/routes/team.js
 const router = require('express').Router();
-const db = require('../models/db');
+const pool = require('../models/db');
 const { authenticate, isSezTeam, isSezAdmin } = require('../middleware/auth');
 
-// GET /api/v1/team — list all SEZ members with user details
-router.get('/', authenticate, (req, res) => {
-  const members = db.prepare(`
-    SELECT
-      m.id, m.role_title, m.speciality, m.queue_count, m.is_active, m.created_at,
-      u.id AS user_id, u.name, u.email, u.department
-    FROM sez_members m
-    JOIN users u ON u.id = m.user_id
-    WHERE m.is_active = 1
-    ORDER BY m.created_at ASC
-  `).all();
+router.get('/', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT m.id, m.role_title, m.speciality, m.queue_count, m.is_active, m.created_at,
+             u.id AS user_id, u.name, u.email, u.department
+      FROM sez_members m
+      JOIN users u ON u.id = m.user_id
+      WHERE m.is_active = 1
+      ORDER BY m.created_at ASC
+    `);
 
-  // For each member, count their active requests
-  const enriched = members.map(m => {
-    const active = db.prepare(`
-      SELECT COUNT(*) AS c FROM requests
-      WHERE assigned_to = ? AND status NOT IN ('Closed','Rejected','Approved')
-    `).get(m.id).c;
-    const total = db.prepare(`SELECT COUNT(*) AS c FROM requests WHERE assigned_to = ?`).get(m.id).c;
-    return { ...m, active_requests: active, total_requests: total };
-  });
+    const members = await Promise.all(result.rows.map(async (m) => {
+      const active = await pool.query(
+        `SELECT COUNT(*) AS c FROM requests WHERE assigned_to = $1 AND status NOT IN ('Closed','Rejected','Approved')`,
+        [m.id]
+      );
+      const total = await pool.query(
+        `SELECT COUNT(*) AS c FROM requests WHERE assigned_to = $1`,
+        [m.id]
+      );
+      return {
+        ...m,
+        active_requests: parseInt(active.rows[0].c),
+        total_requests: parseInt(total.rows[0].c),
+      };
+    }));
 
-  res.json(enriched);
+    res.json(members);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-// PATCH /api/v1/team/:memberId/active — activate / deactivate member (admin only)
-router.patch('/:memberId/active', authenticate, isSezAdmin, (req, res) => {
-  const { isActive } = req.body;
-  db.prepare(`UPDATE sez_members SET is_active = ? WHERE id = ?`).run(isActive ? 1 : 0, req.params.memberId);
-  res.json({ ok: true });
+router.patch('/:memberId/active', authenticate, isSezAdmin, async (req, res) => {
+  try {
+    const { isActive } = req.body;
+    await pool.query(`UPDATE sez_members SET is_active = $1 WHERE id = $2`, [isActive ? 1 : 0, req.params.memberId]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 module.exports = router;
