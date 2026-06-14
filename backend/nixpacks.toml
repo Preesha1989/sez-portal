@@ -2,7 +2,7 @@
 nixPkgs = ["nodejs_20"]
 
 [phases.build]
-cmds = ["npm install"]
+cmds = ["npm install", "npm rebuild better-sqlite3"]
 
 [start]
 cmd = "node src/index.js"

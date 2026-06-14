@@ -8,6 +8,7 @@
     "start": "node src/index.js",
     "seed": "node src/seed.js",
     "migrate": "node src/models/migrate.js"
+    "build": "npm rebuild better-sqlite3"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",
